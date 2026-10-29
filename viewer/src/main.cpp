@@ -84,6 +84,37 @@ private:
     wire::State state_;
 };
 
+/// How the picture is shown. The turn is remembered between runs, since the phone stays put on its arm.
+struct ViewSettings {
+    bool showPanel = true;
+    /// Quarter turns clockwise, from 0 to 3.
+    int quarterTurns = 0;
+
+    void load() {
+        std::size_t size = 0;
+        void* data = SDL_LoadFile(path().c_str(), &size);
+        if (data && size > 0) {
+            int turns = static_cast<const char*>(data)[0] - '0';
+            if (turns >= 0 && turns <= 3) quarterTurns = turns;
+        }
+        SDL_free(data);
+    }
+
+    void rotate(int turns) {
+        quarterTurns = ((quarterTurns + turns) % 4 + 4) % 4;
+        char digit = static_cast<char>('0' + quarterTurns);
+        SDL_SaveFile(path().c_str(), &digit, 1);
+    }
+
+private:
+    static std::string path() {
+        char* folder = SDL_GetPrefPath("uipko", "BoardScope");
+        std::string file = folder ? std::string(folder) + "rotation" : std::string();
+        SDL_free(folder);
+        return file;
+    }
+};
+
 /// Decodes each JPEG straight into a streaming texture and draws it letterboxed.
 class FrameView {
 public:
@@ -116,14 +147,17 @@ public:
         return result == 0 || tj3GetErrorCode(decoder_) == TJERR_WARNING;
     }
 
-    void draw(SDL_FRect area, bool stale) {
+    void draw(SDL_FRect area, bool stale, int quarterTurns) {
         if (!texture_ || area.w <= 0 || area.h <= 0) return;
-        float scale = std::min(area.w / width_, area.h / height_);
-        SDL_FRect target{area.x + (area.w - width_ * scale) / 2, area.y + (area.h - height_ * scale) / 2,
-                         width_ * scale, height_ * scale};
+        // Fit the picture as it will look once turned; it turns about the target's center.
+        bool sideways = quarterTurns % 2 == 1;
+        float scale = std::min(area.w / (sideways ? height_ : width_), area.h / (sideways ? width_ : height_));
+        float width = width_ * scale;
+        float height = height_ * scale;
+        SDL_FRect target{area.x + (area.w - width) / 2, area.y + (area.h - height) / 2, width, height};
         Uint8 shade = stale ? 90 : 255;
         SDL_SetTextureColorMod(texture_, shade, shade, shade);
-        SDL_RenderTexture(renderer_, texture_, nullptr, &target);
+        SDL_RenderTextureRotated(renderer_, texture_, nullptr, &target, 90.0 * quarterTurns, nullptr, SDL_FLIP_NONE);
     }
 
     bool empty() const { return texture_ == nullptr; }
@@ -172,7 +206,7 @@ ImVec4 heatColor(wire::Thermal thermal) {
 }
 
 /// Keyboard shortcuts. Returns false for keys it doesn't use.
-bool handleKey(const SDL_KeyboardEvent& key, Controls& controls, SDL_Window* window, bool& showPanel) {
+bool handleKey(const SDL_KeyboardEvent& key, Controls& controls, SDL_Window* window, ViewSettings& view) {
     bool shift = key.mod & SDL_KMOD_SHIFT;
     switch (key.key) {
     case SDLK_EQUALS:
@@ -191,7 +225,10 @@ bool handleKey(const SDL_KeyboardEvent& key, Controls& controls, SDL_Window* win
         controls.setFocus(controls.focus.value - (shift ? coarseFocusStep : fineFocusStep));
         return true;
     case SDLK_TAB:
-        if (!key.repeat) showPanel = !showPanel;
+        if (!key.repeat) view.showPanel = !view.showPanel;
+        return true;
+    case SDLK_R:
+        if (!key.repeat) view.rotate(shift ? -1 : 1);
         return true;
     case SDLK_F11:
         if (!key.repeat) SDL_SetWindowFullscreen(window, !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN));
@@ -208,7 +245,7 @@ bool handleKey(const SDL_KeyboardEvent& key, Controls& controls, SDL_Window* win
     }
 }
 
-void drawPanel(Controls& controls, bool connected, float height) {
+void drawPanel(Controls& controls, ViewSettings& view, bool connected, float height) {
     const ImGuiIO& io = ImGui::GetIO();
     float width = panelWidth * ImGui::GetStyle().FontScaleDpi;
     ImGui::SetNextWindowPos({io.DisplaySize.x - width, 0});
@@ -254,6 +291,13 @@ void drawPanel(Controls& controls, bool connected, float height) {
     controls.quality.held = ImGui::IsItemActive();
     ImGui::EndDisabled();
 
+    ImGui::SeparatorText("Orientation");
+    float turnWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
+    if (ImGui::Button("Rotate left", {turnWidth, 0})) view.rotate(-1);
+    ImGui::SameLine();
+    if (ImGui::Button("Rotate right", {turnWidth, 0})) view.rotate(1);
+    ImGui::TextDisabled(view.quarterTurns == 0 ? "As the phone sends it" : "Turned %d degrees right", view.quarterTurns * 90);
+
     ImGui::SeparatorText("Phone");
     if (connected) {
         ImGui::Text("%s camera, light %s", state.telephoto ? "Telephoto" : "Main", state.torchOn ? "on" : "off");
@@ -278,13 +322,14 @@ void drawPanel(Controls& controls, bool connected, float height) {
     shortcut("1 to 8", "zoom 1x to 8x");
     shortcut("Up / Down", "focus, fine");
     shortcut("Shift+Up/Down", "focus, coarse");
+    shortcut("R / Shift+R", "rotate right / left");
     shortcut("Tab", "hide controls");
     shortcut("F11", "full screen");
     ImGui::PopItemWidth();
     ImGui::End();
 }
 
-void drawStatusLine(const PhoneLink::Snapshot& link, double shownFps, const FrameView& view, float top) {
+void drawStatusLine(const PhoneLink::Snapshot& link, double shownFps, const FrameView& frames, float top) {
     const ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos({0, top});
     ImGui::SetNextWindowSize({io.DisplaySize.x, io.DisplaySize.y - top});
@@ -295,12 +340,12 @@ void drawStatusLine(const PhoneLink::Snapshot& link, double shownFps, const Fram
     ImGui::TextColored(dot, connected ? "Connected over USB" : "Not connected");
     ImGui::SameLine();
     if (link.status == PhoneLink::Status::connected && !link.state) {
-        ImGui::TextUnformatted("Waiting for BoardScope to answer…");
+        ImGui::TextUnformatted("Waiting for BoardScope to answer...");
     } else if (!connected) {
         ImGui::TextUnformatted(link.problem.c_str());
     } else {
         std::string line = "   " + std::to_string(static_cast<int>(std::lround(shownFps))) + " fps";
-        if (!view.empty()) line += "   " + std::to_string(view.width()) + "x" + std::to_string(view.height());
+        if (!frames.empty()) line += "   " + std::to_string(frames.width()) + "x" + std::to_string(frames.height());
         line += "   " + std::to_string(link.frameBytes / 1024) + " KB/frame";
         char roundTrip[48] = "   round trip --";
         if (link.roundTripMs >= 0) std::snprintf(roundTrip, sizeof roundTrip, "   round trip %.1f ms", link.roundTripMs);
@@ -354,9 +399,10 @@ int main(int, char**) {
 
     PhoneLink link;
     Controls controls(link);
-    FrameView view(renderer);
+    FrameView frames(renderer);
+    ViewSettings view;
+    view.load();
     std::vector<std::uint8_t> jpeg;
-    bool showPanel = true;
     double shownFps = 0;
     int shownFrames = 0;
     auto fpsStart = std::chrono::steady_clock::now();
@@ -375,8 +421,9 @@ int main(int, char**) {
                 running = false;
                 break;
             case SDL_EVENT_KEY_DOWN:
-                if (!io.WantTextInput && (connected || event.key.key == SDLK_TAB || event.key.key == SDLK_F11 || event.key.key == SDLK_ESCAPE)) {
-                    handleKey(event.key, controls, window, showPanel);
+                if (!io.WantTextInput && (connected || event.key.key == SDLK_TAB || event.key.key == SDLK_R ||
+                                          event.key.key == SDLK_F11 || event.key.key == SDLK_ESCAPE)) {
+                    handleKey(event.key, controls, window, view);
                 }
                 break;
             case SDL_EVENT_MOUSE_WHEEL:
@@ -389,7 +436,7 @@ int main(int, char**) {
             }
         }
 
-        if (link.takeFrame(jpeg) && view.show(jpeg)) ++shownFrames;
+        if (link.takeFrame(jpeg) && frames.show(jpeg)) ++shownFrames;
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(now - fpsStart).count();
         if (elapsed >= 1) {
@@ -403,16 +450,16 @@ int main(int, char**) {
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         float statusTop = io.DisplaySize.y - ImGui::GetFrameHeightWithSpacing() - ImGui::GetStyle().WindowPadding.y;
-        float imageWidth = io.DisplaySize.x - (showPanel ? panelWidth * style.FontScaleDpi : 0);
-        if (showPanel) drawPanel(controls, connected, statusTop);
-        drawStatusLine(snapshot, shownFps, view, statusTop);
+        float imageWidth = io.DisplaySize.x - (view.showPanel ? panelWidth * style.FontScaleDpi : 0);
+        if (view.showPanel) drawPanel(controls, view, connected, statusTop);
+        drawStatusLine(snapshot, shownFps, frames, statusTop);
 
         bool stale = snapshot.status != PhoneLink::Status::connected;
         const char* message = nullptr;
         if (stale) {
-            message = snapshot.problem.empty() ? "Looking for the iPhone…" : snapshot.problem.c_str();
-        } else if (view.empty()) {
-            message = "Waiting for the first picture…";
+            message = snapshot.problem.empty() ? "Looking for the iPhone..." : snapshot.problem.c_str();
+        } else if (frames.empty()) {
+            message = "Waiting for the first picture...";
         } else if (snapshot.state && snapshot.state->pausedForHeat) {
             message = "The camera is paused: the phone is too hot. It resumes when it cools down.";
         }
@@ -429,7 +476,7 @@ int main(int, char**) {
         SDL_SetRenderScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
         SDL_SetRenderDrawColor(renderer, 12, 12, 12, 255);
         SDL_RenderClear(renderer);
-        view.draw({0, 0, imageWidth, statusTop}, stale);
+        frames.draw({0, 0, imageWidth, statusTop}, stale, view.quarterTurns);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
     }

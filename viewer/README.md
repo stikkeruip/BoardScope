@@ -18,6 +18,7 @@ The `.exe` isn't signed, so SmartScreen asks once: **More info → Run anyway**.
 | `1` to `8` | zoom 1x to 8x |
 | `Up` / `Down` | focus, fine step |
 | `Shift` + `Up` / `Down` | focus, coarse step |
+| `R` / `Shift` + `R` | rotate the picture right / left (remembered) |
 | `Tab` | hide or show the controls |
 | `F11` | full screen (`Esc` leaves it) |
 

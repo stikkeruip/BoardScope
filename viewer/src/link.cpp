@@ -132,7 +132,7 @@ void PhoneLink::serve() {
     auto lastPing = Clock::time_point{};
     auto fpsStart = Clock::now();
     int fpsFrames = 0;
-    std::string problem = "The link to the iPhone dropped. Reconnecting…";
+    std::string problem = "The link to the iPhone dropped. Reconnecting...";
 
     while (running_) {
         auto now = Clock::now();
@@ -145,7 +145,7 @@ void PhoneLink::serve() {
             lastPing = now;
         }
         if (now - lastHeard > silenceLimit) {
-            problem = "The iPhone stopped answering. Reconnecting…";
+            problem = "The iPhone stopped answering. Reconnecting...";
             break;
         }
 
@@ -174,7 +174,7 @@ void PhoneLink::serve() {
             used += wire::headerSize + length;
         }
         if (broken) {
-            problem = "The iPhone sent something unreadable. Reconnecting…";
+            problem = "The iPhone sent something unreadable. Reconnecting...";
             break;
         }
         inbox.erase(inbox.begin(), inbox.begin() + static_cast<std::ptrdiff_t>(used));
