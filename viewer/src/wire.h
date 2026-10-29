@@ -37,6 +37,9 @@ struct State {
     bool pausedForHeat = false;
     bool torchOn = false;
     bool telephoto = false;
+    /// Percent, or -1 when unknown (or the phone app is older than the battery).
+    int battery = -1;
+    bool charging = false;
 };
 
 struct Command {
@@ -118,7 +121,10 @@ inline std::optional<State> decodeState(const std::uint8_t* payload, std::size_t
     state.thermal = static_cast<Thermal>(thermal > 3 ? 3 : thermal);
     state.pausedForHeat = flags & 1;
     state.torchOn = flags & 2;
+    state.charging = flags & 4;
     state.telephoto = lens == 1;
+    std::uint8_t battery;
+    if (reader.u8(battery) && battery <= 100) state.battery = battery;
     return state;
 }
 

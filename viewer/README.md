@@ -21,7 +21,7 @@ The `.exe` isn't signed, so SmartScreen asks once: **More info → Run anyway**.
 | `Tab` | hide or show the controls |
 | `F11` | full screen (`Esc` leaves it) |
 
-The status line shows the connection, frames per second, round trip to the phone, and the phone's heat.
+The status line shows the connection, frames per second, round trip to the phone, and the phone's heat and battery.
 
 ## Building
 

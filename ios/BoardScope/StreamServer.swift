@@ -18,8 +18,11 @@ final class StreamServer {
     private(set) var status = Status.starting
     /// JPEG quality, from 0.3 to 0.95.
     private(set) var quality: Float
-    /// Set by the screen, which already follows the phone's heat.
+    /// Set by the screen, which already follows the phone's heat and battery.
     var thermal = ProcessInfo.processInfo.thermalState
+    /// From 0 to 1, or negative when unknown.
+    var batteryLevel: Float = -1
+    var isCharging = false
 
     var isViewing: Bool { status == .viewing }
 
@@ -194,7 +197,9 @@ final class StreamServer {
             thermal: thermal,
             isPausedForHeat: camera.isPausedForHeat,
             isTorchOn: camera.isTorchOn,
-            isTelephoto: camera.lens == .telephoto)
+            isTelephoto: camera.lens == .telephoto,
+            batteryLevel: batteryLevel,
+            isCharging: isCharging)
     }
 
     private func sendState() {

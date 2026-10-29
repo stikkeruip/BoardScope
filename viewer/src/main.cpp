@@ -149,6 +149,18 @@ const char* heatLabel(const wire::State& state) {
     return "Unknown";
 }
 
+/// Green on the charger, orange off it (the phone should stay plugged in), red when low.
+ImVec4 batteryColor(const wire::State& state) {
+    if (state.charging) return {0.35f, 0.85f, 0.4f, 1};
+    if (state.battery >= 0 && state.battery < 20) return {1.0f, 0.3f, 0.3f, 1};
+    return {1.0f, 0.6f, 0.2f, 1};
+}
+
+std::string batteryLabel(const wire::State& state) {
+    std::string label = state.battery >= 0 ? std::to_string(state.battery) + "%" : "unknown";
+    return state.charging ? label + ", charging" : label;
+}
+
 ImVec4 heatColor(wire::Thermal thermal) {
     switch (thermal) {
     case wire::Thermal::nominal: return {0.35f, 0.85f, 0.4f, 1};
@@ -248,6 +260,9 @@ void drawPanel(Controls& controls, bool connected, float height) {
         ImGui::Text("Heat:");
         ImGui::SameLine();
         ImGui::TextColored(heatColor(state.thermal), "%s", heatLabel(state));
+        ImGui::Text("Battery:");
+        ImGui::SameLine();
+        ImGui::TextColored(batteryColor(state), "%s", batteryLabel(state).c_str());
     } else {
         ImGui::TextDisabled("Not connected");
     }
@@ -295,6 +310,10 @@ void drawStatusLine(const PhoneLink::Snapshot& link, double shownFps, const Fram
         ImGui::TextUnformatted("   heat");
         ImGui::SameLine();
         ImGui::TextColored(heatColor(link.state->thermal), "%s", heatLabel(*link.state));
+        ImGui::SameLine();
+        ImGui::TextUnformatted("   battery");
+        ImGui::SameLine();
+        ImGui::TextColored(batteryColor(*link.state), "%s", batteryLabel(*link.state).c_str());
     }
     ImGui::End();
 }

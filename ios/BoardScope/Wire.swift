@@ -59,7 +59,8 @@ nonisolated struct ScopeCommand: Sendable {
 
 /// Everything the PC shows about the phone.
 nonisolated struct ScopeState: Sendable, Equatable {
-    static let version: UInt8 = 1
+    /// Version 2 added the battery.
+    static let version: UInt8 = 2
 
     /// The last command applied, so the PC knows its own changes have landed.
     var lastCommand: UInt32
@@ -73,6 +74,9 @@ nonisolated struct ScopeState: Sendable, Equatable {
     var isPausedForHeat: Bool
     var isTorchOn: Bool
     var isTelephoto: Bool
+    /// From 0 to 1, or negative when unknown.
+    var batteryLevel: Float
+    var isCharging: Bool
 
     var payload: Data {
         var data = Data(capacity: 32)
@@ -84,8 +88,10 @@ nonisolated struct ScopeState: Sendable, Equatable {
         data.appendBigEndian(focus)
         data.appendBigEndian(quality)
         data.append(UInt8(clamping: thermal.rawValue))
-        data.append((isPausedForHeat ? 1 : 0) | (isTorchOn ? 2 : 0))
+        data.append((isPausedForHeat ? 1 : 0) | (isTorchOn ? 2 : 0) | (isCharging ? 4 : 0))
         data.append(isTelephoto ? 1 : 0)
+        // Percent, or 255 when unknown.
+        data.append(batteryLevel >= 0 ? UInt8((min(batteryLevel, 1) * 100).rounded()) : 255)
         return data
     }
 }

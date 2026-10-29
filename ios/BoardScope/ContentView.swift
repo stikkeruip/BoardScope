@@ -205,5 +205,7 @@ struct ContentView: View {
         let state = UIDevice.current.batteryState
         isCharging = state == .charging || state == .full
         batteryLevel = UIDevice.current.batteryLevel
+        server.isCharging = isCharging
+        server.batteryLevel = batteryLevel
     }
 }
