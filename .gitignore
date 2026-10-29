@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Xcode (iPhone app)
+xcuserdata/
+*.xcuserstate
+DerivedData/
+*.ipa
+
+# CMake / C++ (Windows viewer)
+build/
+build-*/
+cmake-build-*/
+*.exe
+*.o
+*.obj
+
+# Editors
+.vscode/
+.idea/
