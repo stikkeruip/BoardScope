@@ -8,7 +8,9 @@ struct ContentView: View {
     @State private var camera: CameraController
     @State private var server: StreamServer
     @Environment(\.scenePhase) private var scenePhase
-    @State private var savedBrightness: CGFloat?
+    /// The user's brightness while the screen is dimmed. Kept on disk, so a run that ends dimmed
+    /// (the app was closed or reinstalled) is undone at the next launch.
+    @AppStorage("brightnessBeforeDimming") private var brightnessBeforeDimming: Double?
     @State private var thermal = ProcessInfo.processInfo.thermalState
     @State private var isCharging = false
     @State private var batteryLevel: Float = -1
@@ -58,6 +60,7 @@ struct ContentView: View {
             UIDevice.current.isBatteryMonitoringEnabled = true
             updateBattery()
             showControls()
+            dimScreen(false)
             await camera.start(streamingTo: server.encoder)
             await camera.adapt(to: thermal)
         }
@@ -182,15 +185,20 @@ struct ContentView: View {
         }
     }
 
-    /// Keeps the phone cooler while the PC shows the picture. The user's brightness comes back afterwards.
+    /// Keeps the phone cooler while the PC shows the picture: a third of the user's brightness,
+    /// still readable at a glance. The user's brightness comes back afterwards.
     private func dimScreen(_ dimmed: Bool) {
         guard let screen = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.screen }).first else { return }
         if dimmed {
-            if savedBrightness == nil { savedBrightness = screen.brightness }
-            screen.brightness = 0
-        } else if let savedBrightness {
-            screen.brightness = savedBrightness
-            self.savedBrightness = nil
+            let brightness = brightnessBeforeDimming ?? Double(screen.brightness)
+            brightnessBeforeDimming = brightness
+            let dimmed = max(brightness / 3, 0.05)
+            screen.brightness = CGFloat(dimmed)
+            print("[screen] dimmed from \(brightness) to \(dimmed)")
+        } else if let brightness = brightnessBeforeDimming {
+            screen.brightness = CGFloat(brightness)
+            brightnessBeforeDimming = nil
+            print("[screen] brightness back to \(brightness)")
         }
     }
 
