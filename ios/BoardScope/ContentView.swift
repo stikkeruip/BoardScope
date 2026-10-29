@@ -185,16 +185,15 @@ struct ContentView: View {
         }
     }
 
-    /// Keeps the phone cooler while the PC shows the picture: a third of the user's brightness,
-    /// still readable at a glance. The user's brightness comes back afterwards.
+    /// Turns the brightness all the way down while the PC shows the picture, to save battery and heat.
+    /// The user's brightness comes back afterwards.
     private func dimScreen(_ dimmed: Bool) {
         guard let screen = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.screen }).first else { return }
         if dimmed {
             let brightness = brightnessBeforeDimming ?? Double(screen.brightness)
             brightnessBeforeDimming = brightness
-            let dimmed = max(brightness / 3, 0.05)
-            screen.brightness = CGFloat(dimmed)
-            print("[screen] dimmed from \(brightness) to \(dimmed)")
+            screen.brightness = 0
+            print("[screen] dimmed from \(brightness)")
         } else if let brightness = brightnessBeforeDimming {
             screen.brightness = CGFloat(brightness)
             brightnessBeforeDimming = nil
