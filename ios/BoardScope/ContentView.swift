@@ -2,9 +2,13 @@ import Combine
 import SwiftUI
 
 /// Full-screen preview with pinch and double-tap zoom, a focus slider, and a status corner.
-/// Controls fade after a few seconds without a touch.
+/// Controls fade after a few seconds without a touch. While the PC is viewing, the screen
+/// also dims then, and brightens again at a touch.
 struct ContentView: View {
-    @State private var camera = CameraController()
+    @State private var camera: CameraController
+    @State private var server: StreamServer
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var savedBrightness: CGFloat?
     @State private var thermal = ProcessInfo.processInfo.thermalState
     @State private var isCharging = false
     @State private var batteryLevel: Float = -1
@@ -14,6 +18,12 @@ struct ContentView: View {
     @State private var pinchStartZoom: CGFloat?
     @State private var hideControls: Task<Void, Never>?
     @State private var hideZoom: Task<Void, Never>?
+
+    init() {
+        let camera = CameraController()
+        _camera = State(initialValue: camera)
+        _server = State(initialValue: StreamServer(camera: camera))
+    }
 
     var body: some View {
         ZStack {
@@ -43,16 +53,21 @@ struct ContentView: View {
             controls
         }
         .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in showControls() })
-        .sheet(isPresented: $showSettings) { SettingsView(camera: camera) }
+        .sheet(isPresented: $showSettings) { SettingsView(camera: camera, server: server) }
         .task {
             UIDevice.current.isBatteryMonitoringEnabled = true
             updateBattery()
             showControls()
-            await camera.start()
+            await camera.start(streamingTo: server.encoder)
             await camera.adapt(to: thermal)
         }
+        .task { await server.run() }
         .onChange(of: thermal) { _, state in
+            server.thermal = state
             Task { await camera.adapt(to: state) }
+        }
+        .onChange(of: server.isViewing && !controlsVisible && scenePhase == .active) { _, dimmed in
+            dimScreen(dimmed)
         }
         .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification).receive(on: DispatchQueue.main)) { _ in
             thermal = ProcessInfo.processInfo.thermalState
@@ -74,7 +89,7 @@ struct ContentView: View {
     private var controls: some View {
         VStack {
             HStack(alignment: .top) {
-                StatusBadge(lens: camera.lens, minimumFocusDistance: camera.minimumFocusDistance, thermal: thermal, isCharging: isCharging, batteryLevel: batteryLevel)
+                StatusBadge(lens: camera.lens, minimumFocusDistance: camera.minimumFocusDistance, thermal: thermal, isCharging: isCharging, batteryLevel: batteryLevel, link: server.status)
                 Spacer()
                 Group {
                     roundButton(camera.isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill", tint: camera.isTorchOn ? .yellow : .white) {
@@ -164,6 +179,18 @@ struct ContentView: View {
             try? await Task.sleep(for: .seconds(1.2))
             guard !Task.isCancelled else { return }
             withAnimation(.easeIn(duration: 0.3)) { zoomVisible = false }
+        }
+    }
+
+    /// Keeps the phone cooler while the PC shows the picture. The user's brightness comes back afterwards.
+    private func dimScreen(_ dimmed: Bool) {
+        guard let screen = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.screen }).first else { return }
+        if dimmed {
+            if savedBrightness == nil { savedBrightness = screen.brightness }
+            screen.brightness = 0
+        } else if let savedBrightness {
+            screen.brightness = savedBrightness
+            self.savedBrightness = nil
         }
     }
 

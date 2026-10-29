@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Lens, closest focus, heat and battery, out of the way in a corner.
+/// Lens, closest focus, heat, battery and the PC link, out of the way in a corner.
 struct StatusBadge: View {
     let lens: Lens
     /// Millimeters.
@@ -9,6 +9,7 @@ struct StatusBadge: View {
     let isCharging: Bool
     /// From 0 to 1, or negative when unknown.
     let batteryLevel: Float
+    let link: StreamServer.Status
 
     var body: some View {
         HStack(spacing: 10) {
@@ -25,6 +26,8 @@ struct StatusBadge: View {
                 }
             }
             .foregroundStyle(batteryColor)
+            Label(link.label, systemImage: link.symbol)
+                .foregroundStyle(link.color)
         }
         .font(.caption.weight(.medium))
         .foregroundStyle(.white)
@@ -69,6 +72,32 @@ extension ProcessInfo.ThermalState {
         case .serious: .orange
         case .critical: .red
         @unknown default: .gray
+        }
+    }
+}
+
+extension StreamServer.Status {
+    var label: String {
+        switch self {
+        case .starting, .waiting: "No PC"
+        case .viewing: "PC viewing"
+        case .failed(let problem): problem
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .starting, .waiting: "cable.connector"
+        case .viewing: "desktopcomputer"
+        case .failed: "exclamationmark.triangle.fill"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .starting, .waiting: .gray
+        case .viewing: .green
+        case .failed: .red
         }
     }
 }

@@ -23,11 +23,24 @@ final class CameraController {
     private(set) var configurationID = 0
 
     let session = AVCaptureSession()
+    /// Frames for the PC, with the same framing as the preview.
+    @ObservationIgnored private let videoOutput = AVCaptureVideoDataOutput()
     @ObservationIgnored private var device: AVCaptureDevice?
     @ObservationIgnored private var framesPerSecond: CMTimeScale = 30
     @ObservationIgnored private let sessionQueue = DispatchQueue(label: "com.uipko.boardscope.session")
 
     var displayZoom: CGFloat { zoom * lens.displayScale }
+
+    /// Zoom range as shown on screen, limited by what the current camera can do.
+    var displayZoomRange: ClosedRange<Double> {
+        let range = zoomRange
+        return Double(range.lowerBound * lens.displayScale)...Double(range.upperBound * lens.displayScale)
+    }
+
+    private var zoomRange: ClosedRange<CGFloat> {
+        let maxZoom = min(lens.zoomRange.upperBound, device?.activeFormat.videoMaxZoomFactor ?? 1)
+        return lens.zoomRange.lowerBound...max(maxZoom, lens.zoomRange.lowerBound)
+    }
 
     init() {
         let defaults = UserDefaults.standard
@@ -37,12 +50,16 @@ final class CameraController {
         torchLevel = Float(defaults.object(forKey: "torchLevel") as? Double ?? 0.5)
     }
 
-    func start() async {
+    func start(streamingTo encoder: FrameEncoder) async {
         guard await AVCaptureDevice.requestAccess(for: .video) else {
             problem = "BoardScope needs the camera. Allow it in Settings → BoardScope."
             return
         }
         session.sessionPreset = .inputPriority
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.setSampleBufferDelegate(encoder, queue: encoder.queue)
+        if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
         await configure(lens)
     }
 
@@ -53,11 +70,14 @@ final class CameraController {
     }
 
     func setZoom(_ factor: CGFloat) {
-        let maxZoom = min(lens.zoomRange.upperBound, device?.activeFormat.videoMaxZoomFactor ?? 1)
-        zoom = min(max(factor, lens.zoomRange.lowerBound), maxZoom)
+        zoom = min(max(factor, zoomRange.lowerBound), zoomRange.upperBound)
         guard let device, (try? device.lockForConfiguration()) != nil else { return }
         device.videoZoomFactor = zoom
         device.unlockForConfiguration()
+    }
+
+    func setDisplayZoom(_ value: Double) {
+        setZoom(CGFloat(value) / lens.displayScale)
     }
 
     func toggleZoom() {
@@ -206,14 +226,20 @@ final class CameraController {
         applyFrameRate(device)
     }
 
-    /// A 1080p format that runs at 30 fps, preferring one whose 2x zoom reads the 48 MP sensor at full detail.
+    /// A 1080p format that runs at 30 fps, preferring one whose 2x zoom reads the 48 MP sensor at full detail,
+    /// then full-range color, which the JPEG encoder takes without converting.
     private static func streamFormat(for device: AVCaptureDevice) -> AVCaptureDevice.Format? {
         let candidates = device.formats.filter { format in
             let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             return size.width == 1920 && size.height == 1080
                 && format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 30 }
         }
-        return candidates.first { $0.secondaryNativeResolutionZoomFactors.contains(2) } ?? candidates.first
+        let detailed = candidates.filter { $0.secondaryNativeResolutionZoomFactors.contains(2) }
+        let preferred = detailed.isEmpty ? candidates : detailed
+        let fullRange = preferred.first {
+            CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        }
+        return fullRange ?? preferred.first
     }
 
     /// Fixes the frame rate, changing the min and max frame durations in an order the camera accepts.
