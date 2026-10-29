@@ -10,7 +10,11 @@
 /// `ios/BoardScope/Wire.swift` is the other half of this file.
 namespace wire {
 
+/// Over USB, through Apple's USB service.
 constexpr std::uint16_t port = 7700;
+/// Over Wi-Fi, announced with Bonjour.
+constexpr std::uint16_t wifiPort = 7701;
+constexpr const char* bonjourType = "_boardscope._tcp";
 constexpr std::size_t headerSize = 5;
 constexpr std::uint32_t maxPayload = 16 * 1024 * 1024;
 
@@ -21,6 +25,9 @@ enum class Type : std::uint8_t {
     state = 4,     // phone → PC: zoom, focus, quality and heat, after every change from either side
     ping = 5,      // either way: 8 opaque bytes, echoed back unchanged in a pong
     pong = 6,
+    hello = 7,      // PC → phone, first over Wi-Fi: a version byte, then the pairing code as text
+    denied = 8,     // phone → PC: wrong pairing code; the phone closes the connection
+    takenOver = 9,  // phone → PC: another viewer connected, and this one is being closed
 };
 
 enum class Thermal : std::uint8_t { nominal, fair, serious, critical };
@@ -36,6 +43,9 @@ struct State {
     Thermal thermal = Thermal::nominal;
     bool pausedForHeat = false;
     bool torchOn = false;
+    bool hasTorch = false;
+    /// The light's brightness, from 0.05 to 1.
+    float torchLevel = 0.5f;
     bool telephoto = false;
     /// Percent, or -1 when unknown (or the phone app is older than the battery).
     int battery = -1;
@@ -45,6 +55,8 @@ struct State {
 struct Command {
     std::uint32_t sequence = 0;
     std::optional<float> zoom, focus, quality;
+    std::optional<bool> torchOn;
+    std::optional<float> torchLevel;
 };
 
 class Writer {
@@ -102,10 +114,13 @@ inline std::vector<std::uint8_t> message(Type type, const std::uint8_t* payload,
 inline std::vector<std::uint8_t> encode(const Command& command) {
     Writer writer;
     writer.u32(command.sequence);
-    writer.u8((command.zoom ? 1 : 0) | (command.focus ? 2 : 0) | (command.quality ? 4 : 0));
+    writer.u8((command.zoom ? 1 : 0) | (command.focus ? 2 : 0) | (command.quality ? 4 : 0) |
+              (command.torchOn ? 8 : 0) | (command.torchLevel ? 16 : 0));
     writer.f32(command.zoom.value_or(0));
     writer.f32(command.focus.value_or(0));
     writer.f32(command.quality.value_or(0));
+    writer.u8(command.torchOn.value_or(false) ? 1 : 0);
+    writer.f32(command.torchLevel.value_or(0));
     return message(Type::command, writer.bytes.data(), writer.bytes.size());
 }
 
@@ -123,8 +138,10 @@ inline std::optional<State> decodeState(const std::uint8_t* payload, std::size_t
     state.torchOn = flags & 2;
     state.charging = flags & 4;
     state.telephoto = lens == 1;
-    std::uint8_t battery;
+    // Fields added later; an older phone app stops before them.
+    std::uint8_t battery, hasTorch;
     if (reader.u8(battery) && battery <= 100) state.battery = battery;
+    if (reader.f32(state.torchLevel) && reader.u8(hasTorch)) state.hasTorch = hasTorch;
     return state;
 }
 

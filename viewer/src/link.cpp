@@ -2,6 +2,7 @@
 
 #include <chrono>
 
+#include "mdns.h"
 #include "usbmux.h"
 
 using namespace std::chrono_literals;
@@ -11,8 +12,13 @@ namespace {
 
 constexpr auto retryInterval = 500ms;
 constexpr auto pingInterval = 500ms;
-/// The phone answers every ping, so this much silence means the link is gone.
-constexpr auto silenceLimit = 2s;
+/// The phone answers every ping, so this much silence means the link is gone. Wi-Fi gets more slack.
+constexpr auto usbSilenceLimit = 2s;
+constexpr auto wifiSilenceLimit = 3s;
+/// How long to listen for the phone's Bonjour answer.
+constexpr auto browseTime = 800ms;
+/// How often a Wi-Fi link checks whether the cable has been plugged in.
+constexpr auto usbCheckInterval = 3s;
 
 std::uint64_t microsecondsNow() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count());
@@ -21,13 +27,21 @@ std::uint64_t microsecondsNow() {
 #ifdef _WIN32
 constexpr const char* noServiceAdvice =
     "Apple Mobile Device Service isn't running. Install Apple Devices from the Microsoft Store, or iTunes.";
+constexpr const char* noPhoneAnywhere =
+    "No iPhone found. Open BoardScope with the phone on this Wi-Fi network, or plug it in "
+    "(the cable needs Apple Devices from the Microsoft Store).";
 #else
 constexpr const char* noServiceAdvice = "Apple's USB service (usbmuxd) isn't running.";
+constexpr const char* noPhoneAnywhere =
+    "No iPhone found. Plug it in with its cable, or open BoardScope with the phone on this Wi-Fi network.";
 #endif
+constexpr const char* noUsbPhone = "Connect the iPhone with its USB cable, unlock it, and tap Trust if it asks.";
+constexpr const char* noWifiPhone =
+    "BoardScope isn't on this Wi-Fi network. Open it on the iPhone, with Viewing over Wi-Fi on in its Settings.";
 
 }  // namespace
 
-PhoneLink::PhoneLink() : thread_([this] { run(); }) {}
+PhoneLink::PhoneLink(Options options) : options_(std::move(options)), thread_([this] { run(); }) {}
 
 PhoneLink::~PhoneLink() {
     running_ = false;
@@ -38,6 +52,20 @@ PhoneLink::Snapshot PhoneLink::snapshot() const {
     std::lock_guard lock(mutex_);
     return snapshot_;
 }
+
+PhoneLink::Options PhoneLink::options() const {
+    std::lock_guard lock(mutex_);
+    return options_;
+}
+
+void PhoneLink::setOptions(Options options) {
+    std::lock_guard lock(mutex_);
+    if (options.mode != options_.mode) restart_ = true;
+    options_ = std::move(options);
+    paused_ = false;
+}
+
+void PhoneLink::reconnect() { paused_ = false; }
 
 bool PhoneLink::takeFrame(std::vector<std::uint8_t>& jpeg) {
     std::lock_guard lock(mutex_);
@@ -69,72 +97,167 @@ void PhoneLink::setStatus(Status status, std::string problem) {
 
 void PhoneLink::run() {
     net::startup();
+    auto lastCableTry = Clock::time_point{};
     while (running_) {
+        if (paused_) {
+            // Waiting for a pairing code doesn't stop the cable from working.
+            Status status;
+            std::string problem;
+            if (snapshot().status == Status::needsCode && options().mode == Mode::automatic &&
+                Clock::now() - lastCableTry >= 1s) {
+                lastCableTry = Clock::now();
+                if (connectUsb(status, problem)) {
+                    paused_ = false;
+                    serve();
+                    continue;
+                }
+            }
+            std::this_thread::sleep_for(50ms);
+            continue;
+        }
         if (connect()) serve();
-        for (auto waited = 0ms; running_ && waited < retryInterval; waited += 50ms) {
+        if (handover_.valid()) continue;  // switch to the cable straight away
+        for (auto waited = 0ms; running_ && !restart_ && waited < retryInterval; waited += 50ms) {
             std::this_thread::sleep_for(50ms);
         }
     }
 }
 
 bool PhoneLink::connect() {
+    restart_ = false;
+    if (handover_.valid()) {
+        use(std::move(handover_), Transport::usb, handoverSerial_);
+        return true;
+    }
+    Options options = this->options();
+    Status status = Status::noPhone;
+    std::string problem;
+    if (options.mode != Mode::wifi) {
+        if (connectUsb(status, problem)) return true;
+        // On the cable but with the app closed, the phone can't be on Wi-Fi either.
+        if (status == Status::noApp || options.mode == Mode::usb) {
+            setStatus(status, problem);
+            return false;
+        }
+    }
+    if (options.mode != Mode::usb) {
+        if (connectWifi(options, status, problem)) return true;
+        if (options.mode == Mode::automatic && status == Status::noPhone && options.address.empty()) {
+            problem = noPhoneAnywhere;
+        }
+    }
+    setStatus(status, problem);
+    return false;
+}
+
+bool PhoneLink::connectUsb(Status& status, std::string& problem) {
     std::string error;
     std::vector<usbmux::Device> devices;
     switch (usbmux::listDevices(devices, error)) {
     case usbmux::Result::ok:
         break;
     case usbmux::Result::noService:
-        setStatus(Status::noService, noServiceAdvice);
+        status = Status::noService;
+        problem = noServiceAdvice;
         return false;
     case usbmux::Result::noDevice:
-        setStatus(Status::noPhone, "Connect the iPhone with its USB cable, unlock it, and tap Trust if it asks.");
+        status = Status::noPhone;
+        problem = noUsbPhone;
         return false;
     default:
-        setStatus(Status::noService, error);
+        status = Status::noService;
+        problem = error;
         return false;
     }
-
     for (const usbmux::Device& device : devices) {
         net::Socket socket;
         usbmux::Result result = usbmux::connect(device, wire::port, socket, error);
         if (result == usbmux::Result::refused) {
-            setStatus(Status::noApp, "iPhone found. Open BoardScope on it.");
+            status = Status::noApp;
+            problem = "iPhone found. Open BoardScope on it.";
             continue;
         }
         if (result != usbmux::Result::ok) {
-            setStatus(Status::noPhone, error);
+            status = Status::noPhone;
+            problem = error;
             continue;
         }
         socket.setTimeouts(1s);
-        {
-            std::lock_guard lock(sendMutex_);
-            socket_ = std::move(socket);
-            nextSequence_ = 1;
-        }
-        std::lock_guard lock(mutex_);
-        snapshot_.status = Status::connected;
-        snapshot_.problem.clear();
-        snapshot_.serial = device.serial;
-        snapshot_.state.reset();
-        snapshot_.roundTripMs = -1;
-        snapshot_.receivedFps = 0;
-        ++snapshot_.connection;
+        use(std::move(socket), Transport::usb, device.serial);
         return true;
     }
     return false;
 }
 
+bool PhoneLink::connectWifi(const Options& options, Status& status, std::string& problem) {
+    std::string address = options.address;
+    std::string name;
+    std::uint16_t port = wire::wifiPort;
+    if (address.empty()) {
+        std::vector<mdns::Service> found = mdns::browse(wire::bonjourType, browseTime);
+        if (found.empty()) {
+            status = Status::noPhone;
+            problem = noWifiPhone;
+            return false;
+        }
+        address = found.front().address;
+        name = found.front().name;
+        if (found.front().port) port = found.front().port;
+    }
+    std::string error;
+    net::Socket socket = net::connectTcp(address.c_str(), port, error, 2s);
+    if (!socket.valid()) {
+        status = Status::noPhone;
+        problem = error + ". Is BoardScope open, with Viewing over Wi-Fi on in its Settings?";
+        return false;
+    }
+    socket.setTimeouts(1s);
+    // The phone sends nothing until it has the pairing code.
+    wire::Writer hello;
+    hello.u8(1);
+    for (char digit : options.pairingCode) hello.u8(static_cast<std::uint8_t>(digit));
+    std::vector<std::uint8_t> message = wire::message(wire::Type::hello, hello.bytes.data(), hello.bytes.size());
+    if (!socket.sendAll(message.data(), message.size())) {
+        status = Status::noPhone;
+        problem = "The iPhone closed the connection.";
+        return false;
+    }
+    use(std::move(socket), Transport::wifi, name.empty() ? address : name + ", " + address);
+    return true;
+}
+
+void PhoneLink::use(net::Socket socket, Transport transport, std::string phone) {
+    {
+        std::lock_guard lock(sendMutex_);
+        socket_ = std::move(socket);
+        nextSequence_ = 1;
+    }
+    std::lock_guard lock(mutex_);
+    snapshot_.status = Status::connected;
+    snapshot_.problem.clear();
+    snapshot_.transport = transport;
+    snapshot_.phone = std::move(phone);
+    snapshot_.state.reset();
+    snapshot_.roundTripMs = -1;
+    snapshot_.receivedFps = 0;
+    ++snapshot_.connection;
+}
+
 /// Reads messages until the link drops, pinging the phone twice a second.
 void PhoneLink::serve() {
+    Transport transport = snapshot().transport;
+    auto silenceLimit = transport == Transport::usb ? usbSilenceLimit : wifiSilenceLimit;
     std::vector<std::uint8_t> inbox;
     std::vector<std::uint8_t> chunk(256 * 1024);
     auto lastHeard = Clock::now();
     auto lastPing = Clock::time_point{};
+    auto lastUsbCheck = Clock::now();
     auto fpsStart = Clock::now();
     int fpsFrames = 0;
+    std::optional<wire::Type> farewell;
     std::string problem = "The link to the iPhone dropped. Reconnecting...";
 
-    while (running_) {
+    while (running_ && !restart_ && !farewell) {
         auto now = Clock::now();
         if (now - lastPing >= pingInterval) {
             wire::Writer ping;
@@ -147,6 +270,24 @@ void PhoneLink::serve() {
         if (now - lastHeard > silenceLimit) {
             problem = "The iPhone stopped answering. Reconnecting...";
             break;
+        }
+        if (transport == Transport::wifi && options().mode == Mode::automatic && now - lastUsbCheck >= usbCheckInterval) {
+            lastUsbCheck = now;
+            std::vector<usbmux::Device> devices;
+            std::string error;
+            if (usbmux::listDevices(devices, error) == usbmux::Result::ok) {
+                for (const usbmux::Device& device : devices) {
+                    if (usbmux::connect(device, wire::port, handover_, error) == usbmux::Result::ok) {
+                        handover_.setTimeouts(1s);
+                        handoverSerial_ = device.serial;
+                        break;
+                    }
+                }
+            }
+            if (handover_.valid()) {
+                problem = "Switching to the USB cable...";
+                break;
+            }
         }
 
         long got = socket_.readSome(chunk.data(), chunk.size(), 50ms);
@@ -169,9 +310,14 @@ void PhoneLink::serve() {
             }
             if (inbox.size() - used - wire::headerSize < length) break;
             const std::uint8_t* payload = inbox.data() + used + wire::headerSize;
-            if (static_cast<wire::Type>(type) == wire::Type::frame) ++fpsFrames;
-            handle(static_cast<wire::Type>(type), payload, length);
             used += wire::headerSize + length;
+            auto messageType = static_cast<wire::Type>(type);
+            if (messageType == wire::Type::denied || messageType == wire::Type::takenOver) {
+                farewell = messageType;
+                break;
+            }
+            if (messageType == wire::Type::frame) ++fpsFrames;
+            handle(messageType, payload, length);
         }
         if (broken) {
             problem = "The iPhone sent something unreadable. Reconnecting...";
@@ -192,7 +338,19 @@ void PhoneLink::serve() {
         std::lock_guard lock(sendMutex_);
         socket_.close();
     }
-    if (running_) setStatus(Status::searching, problem);
+    if (farewell == wire::Type::denied) {
+        // Wait for the user rather than guessing again; new options end the wait.
+        paused_ = true;
+        setStatus(Status::needsCode, options().pairingCode.empty()
+                                         ? "Enter the pairing code shown in BoardScope's Settings on the iPhone."
+                                         : "That pairing code didn't work. Check it in BoardScope's Settings on the iPhone.");
+    } else if (farewell == wire::Type::takenOver) {
+        // Reconnecting on our own would just take the phone back; the user decides.
+        paused_ = true;
+        setStatus(Status::takenOver, "Another viewer is using the iPhone.");
+    } else if (running_) {
+        setStatus(Status::searching, problem);
+    }
 }
 
 void PhoneLink::handle(wire::Type type, const std::uint8_t* payload, std::size_t size) {

@@ -48,7 +48,9 @@ private:
 
 /// Starts the socket library on Windows; does nothing elsewhere.
 void startup();
-Socket connectTcp(const char* host, std::uint16_t port, std::string& error);
+/// Connects to `host` (a name or IPv4 address), giving up after `timeout`.
+Socket connectTcp(const char* host, std::uint16_t port, std::string& error,
+                  std::chrono::milliseconds timeout = std::chrono::seconds(3));
 Socket connectUnix(const char* path, std::string& error);
 
 }  // namespace net

@@ -8,6 +8,8 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/select.h>
@@ -28,10 +30,20 @@ namespace {
 using Native = SOCKET;
 int lastError() { return WSAGetLastError(); }
 bool interrupted() { return false; }
+bool connecting() { return WSAGetLastError() == WSAEWOULDBLOCK; }
+void setBlocking(Native s, bool blocking) {
+    u_long nonBlocking = blocking ? 0 : 1;
+    ioctlsocket(s, FIONBIO, &nonBlocking);
+}
 #else
 using Native = int;
 int lastError() { return errno; }
 bool interrupted() { return errno == EINTR; }
+bool connecting() { return errno == EINPROGRESS; }
+void setBlocking(Native s, bool blocking) {
+    int flags = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, blocking ? flags & ~O_NONBLOCK : flags | O_NONBLOCK);
+}
 #endif
 
 Native native(Handle handle) { return static_cast<Native>(handle); }
@@ -134,21 +146,51 @@ void startup() {
 #endif
 }
 
-Socket connectTcp(const char* host, std::uint16_t port, std::string& error) {
+Socket connectTcp(const char* host, std::uint16_t port, std::string& error, std::chrono::milliseconds timeout) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* found = nullptr;
+    if (getaddrinfo(host, std::to_string(port).c_str(), &hints, &found) != 0 || !found) {
+        error = std::string("Can't find ") + host;
+        return {};
+    }
+    sockaddr_in address;
+    std::memcpy(&address, found->ai_addr, sizeof address);
+    freeaddrinfo(found);
+
     Native s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     Socket socket(static_cast<Handle>(s));
     if (!socket.valid()) {
         error = describe("socket");
         return {};
     }
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    inet_pton(AF_INET, host, &address.sin_addr);
+    // Connect without blocking, so an address that doesn't answer gives up after `timeout`.
+    setBlocking(s, false);
     if (::connect(s, reinterpret_cast<sockaddr*>(&address), sizeof address) != 0) {
-        error = describe("connect");
-        return {};
+        if (!connecting()) {
+            error = describe("connect");
+            return {};
+        }
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(s, &writable);
+        timeval wait{};
+        wait.tv_sec = static_cast<long>(timeout.count() / 1000);
+        wait.tv_usec = static_cast<long>(timeout.count() % 1000 * 1000);
+        int problem = 0;
+        socklen_t length = sizeof problem;
+        if (::select(static_cast<int>(s) + 1, nullptr, &writable, nullptr, &wait) <= 0) {
+            error = std::string("No answer from ") + host;
+            return {};
+        }
+        getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&problem), &length);
+        if (problem != 0) {
+            error = std::string("Couldn't connect to ") + host + " (error " + std::to_string(problem) + ")";
+            return {};
+        }
     }
+    setBlocking(s, true);
     int on = 1;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&on), sizeof on);
     return socket;

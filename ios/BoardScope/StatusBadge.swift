@@ -80,7 +80,7 @@ extension StreamServer.Status {
     var label: String {
         switch self {
         case .starting, .waiting: "No PC"
-        case .viewing: "PC viewing"
+        case .viewing(let overWiFi): overWiFi ? "PC viewing over Wi-Fi" : "PC viewing"
         case .failed(let problem): problem
         }
     }
@@ -88,7 +88,7 @@ extension StreamServer.Status {
     var symbol: String {
         switch self {
         case .starting, .waiting: "cable.connector"
-        case .viewing: "desktopcomputer"
+        case .viewing(let overWiFi): overWiFi ? "wifi" : "desktopcomputer"
         case .failed: "exclamationmark.triangle.fill"
         }
     }

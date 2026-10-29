@@ -94,10 +94,10 @@ final class CameraController {
         device.unlockForConfiguration()
     }
 
-    func setTorch(on: Bool) async {
+    /// Call `finishTorchChange()` once the light has settled.
+    func setTorch(on: Bool) {
         isTorchOn = on
         applyTorch()
-        await finishTorchChange()
     }
 
     func setTorchLevel(_ level: Float) {

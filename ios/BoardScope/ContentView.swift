@@ -96,7 +96,8 @@ struct ContentView: View {
                 Spacer()
                 Group {
                     roundButton(camera.isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill", tint: camera.isTorchOn ? .yellow : .white) {
-                        Task { await camera.setTorch(on: !camera.isTorchOn) }
+                        camera.setTorch(on: !camera.isTorchOn)
+                        Task { await camera.finishTorchChange() }
                     }
                     .disabled(!camera.hasTorch)
                     roundButton("gearshape.fill", tint: .white) { showSettings = true }

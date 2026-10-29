@@ -15,10 +15,20 @@ nonisolated enum MessageType: UInt8, Sendable {
     /// Either way: 8 opaque bytes, echoed back unchanged in a pong.
     case ping = 5
     case pong = 6
+    /// PC → phone, first over Wi-Fi: a version byte, then the pairing code as text.
+    case hello = 7
+    /// Phone → PC: the pairing code was wrong; the phone closes the connection.
+    case denied = 8
+    /// Phone → PC: another viewer connected, and this one is being closed.
+    case takenOver = 9
 }
 
 nonisolated enum Wire {
+    /// Over USB: the loopback interface, which Apple's USB service connects to.
     static let port: UInt16 = 7700
+    /// Over Wi-Fi, announced with Bonjour.
+    static let wifiPort: UInt16 = 7701
+    static let bonjourType = "_boardscope._tcp"
     static let headerSize = 5
     /// The PC only sends small messages; anything larger means the stream is out of step.
     static let maxIncomingPayload = 64 * 1024
@@ -45,22 +55,30 @@ nonisolated struct ScopeCommand: Sendable {
     var zoom: Double?
     var focus: Float?
     var quality: Float?
+    var isTorchOn: Bool?
+    /// From 0.05 to 1.
+    var torchLevel: Float?
 
     init?(_ payload: Data) {
         var reader = WireReader(payload)
         guard let sequence = reader.uint32(), let fields = reader.uint8(),
               let zoom = reader.float32(), let focus = reader.float32(), let quality = reader.float32() else { return nil }
+        // The light came later; older viewers stop after the quality.
+        let torch = reader.uint8()
+        let torchLevel = reader.float32()
         self.sequence = sequence
         if fields & 1 != 0, zoom.isFinite { self.zoom = Double(zoom) }
         if fields & 2 != 0, focus.isFinite { self.focus = focus }
         if fields & 4 != 0, quality.isFinite { self.quality = quality }
+        if fields & 8 != 0, let torch { isTorchOn = torch != 0 }
+        if fields & 16 != 0, let torchLevel, torchLevel.isFinite { self.torchLevel = torchLevel }
     }
 }
 
 /// Everything the PC shows about the phone.
 nonisolated struct ScopeState: Sendable, Equatable {
-    /// Version 2 added the battery.
-    static let version: UInt8 = 2
+    /// Version 2 added the battery, version 3 the light's brightness.
+    static let version: UInt8 = 3
 
     /// The last command applied, so the PC knows its own changes have landed.
     var lastCommand: UInt32
@@ -73,6 +91,9 @@ nonisolated struct ScopeState: Sendable, Equatable {
     var thermal: ProcessInfo.ThermalState
     var isPausedForHeat: Bool
     var isTorchOn: Bool
+    var hasTorch: Bool
+    /// From 0.05 to 1.
+    var torchLevel: Float
     var isTelephoto: Bool
     /// From 0 to 1, or negative when unknown.
     var batteryLevel: Float
@@ -92,6 +113,8 @@ nonisolated struct ScopeState: Sendable, Equatable {
         data.append(isTelephoto ? 1 : 0)
         // Percent, or 255 when unknown.
         data.append(batteryLevel >= 0 ? UInt8((min(batteryLevel, 1) * 100).rounded()) : 255)
+        data.appendBigEndian(torchLevel)
+        data.append(hasTorch ? 1 : 0)
         return data
     }
 }

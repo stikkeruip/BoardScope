@@ -76,6 +76,7 @@ target_link_libraries(imgui PUBLIC SDL3::SDL3-static)
 add_executable(BoardScope WIN32
   src/main.cpp
   src/link.cpp
+  src/mdns.cpp
   src/usbmux.cpp
   src/plist.cpp
   src/net.cpp)

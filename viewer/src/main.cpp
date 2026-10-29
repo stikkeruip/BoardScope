@@ -39,20 +39,30 @@ struct Synced {
 /// Zoom, focus and JPEG quality, kept in step with the phone.
 class Controls {
 public:
-    explicit Controls(PhoneLink& link) : link_(link) {}
+    explicit Controls(PhoneLink& link) : link_(link) {
+        // Until the phone says otherwise, show the defaults rather than zeros.
+        zoom.value = state_.zoom;
+        focus.value = state_.focus;
+        quality.value = state_.quality;
+        lightLevel.value = state_.torchLevel;
+    }
 
     Synced zoom, focus, quality;
+    /// The light, 1 for on, and its brightness.
+    Synced light, lightLevel;
 
     void update(const PhoneLink::Snapshot& snapshot) {
         if (snapshot.connection != connection_) {
             connection_ = snapshot.connection;
-            zoom.pending = focus.pending = quality.pending = 0;
+            zoom.pending = focus.pending = quality.pending = light.pending = lightLevel.pending = 0;
         }
         if (!snapshot.state) return;
         state_ = *snapshot.state;
         zoom.follow(state_.zoom, state_.lastCommand);
         focus.follow(state_.focus, state_.lastCommand);
         quality.follow(state_.quality, state_.lastCommand);
+        light.follow(state_.torchOn ? 1.0f : 0.0f, state_.lastCommand);
+        lightLevel.follow(state_.torchLevel, state_.lastCommand);
     }
 
     const wire::State& state() const { return state_; }
@@ -78,40 +88,87 @@ public:
         quality.pending = link_.send(command);
     }
 
+    void setLight(bool on) {
+        light.value = on ? 1.0f : 0.0f;
+        wire::Command command;
+        command.torchOn = on;
+        light.pending = link_.send(command);
+    }
+
+    void setLightLevel(float value) {
+        lightLevel.value = std::clamp(value, 0.05f, 1.0f);
+        wire::Command command;
+        command.torchLevel = lightLevel.value;
+        lightLevel.pending = link_.send(command);
+    }
+
 private:
     PhoneLink& link_;
     std::uint64_t connection_ = 0;
     wire::State state_;
 };
 
-/// How the picture is shown. The turn is remembered between runs, since the phone stays put on its arm.
-struct ViewSettings {
-    bool showPanel = true;
-    /// Quarter turns clockwise, from 0 to 3.
+/// What the viewer remembers between runs, as key=value lines in one small file.
+struct Settings {
+    /// Quarter turns clockwise, from 0 to 3. Remembered since the phone stays put on its arm.
     int quarterTurns = 0;
+    PhoneLink::Options link;
 
     void load() {
         std::size_t size = 0;
         void* data = SDL_LoadFile(path().c_str(), &size);
-        if (data && size > 0) {
-            int turns = static_cast<const char*>(data)[0] - '0';
-            if (turns >= 0 && turns <= 3) quarterTurns = turns;
-        }
+        if (!data) return;
+        std::string text(static_cast<const char*>(data), size);
         SDL_free(data);
+        for (std::size_t start = 0; start < text.size();) {
+            std::size_t end = std::min(text.find('\n', start), text.size());
+            std::string line = text.substr(start, end - start);
+            start = end + 1;
+            std::size_t equals = line.find('=');
+            if (equals == std::string::npos) continue;
+            std::string key = line.substr(0, equals);
+            std::string value = line.substr(equals + 1);
+            if (key == "rotation") {
+                quarterTurns = std::clamp(std::atoi(value.c_str()), 0, 3);
+            } else if (key == "connection") {
+                link.mode = value == "usb" ? PhoneLink::Mode::usb : value == "wifi" ? PhoneLink::Mode::wifi : PhoneLink::Mode::automatic;
+            } else if (key == "pairing-code") {
+                link.pairingCode = value;
+            } else if (key == "phone-address") {
+                link.address = value;
+            }
+        }
+    }
+
+    void save() const {
+        const char* mode = link.mode == PhoneLink::Mode::usb ? "usb" : link.mode == PhoneLink::Mode::wifi ? "wifi" : "automatic";
+        std::string text = "rotation=" + std::to_string(quarterTurns) + "\nconnection=" + mode +
+                           "\npairing-code=" + link.pairingCode + "\nphone-address=" + link.address + "\n";
+        SDL_SaveFile(path().c_str(), text.data(), text.size());
     }
 
     void rotate(int turns) {
         quarterTurns = ((quarterTurns + turns) % 4 + 4) % 4;
-        char digit = static_cast<char>('0' + quarterTurns);
-        SDL_SaveFile(path().c_str(), &digit, 1);
+        save();
     }
 
 private:
     static std::string path() {
         char* folder = SDL_GetPrefPath("uipko", "BoardScope");
-        std::string file = folder ? std::string(folder) + "rotation" : std::string();
+        std::string file = folder ? std::string(folder) + "settings.txt" : std::string();
         SDL_free(folder);
         return file;
+    }
+};
+
+/// The connection fields being typed in the panel, applied when the user leaves a field.
+struct ConnectionForm {
+    char pairingCode[16] = {};
+    char address[128] = {};
+
+    explicit ConnectionForm(const PhoneLink::Options& options) {
+        std::snprintf(pairingCode, sizeof pairingCode, "%s", options.pairingCode.c_str());
+        std::snprintf(address, sizeof address, "%s", options.address.c_str());
     }
 };
 
@@ -206,7 +263,7 @@ ImVec4 heatColor(wire::Thermal thermal) {
 }
 
 /// Keyboard shortcuts. Returns false for keys it doesn't use.
-bool handleKey(const SDL_KeyboardEvent& key, Controls& controls, SDL_Window* window, ViewSettings& view) {
+bool handleKey(const SDL_KeyboardEvent& key, Controls& controls, SDL_Window* window, Settings& settings, bool& showPanel) {
     bool shift = key.mod & SDL_KMOD_SHIFT;
     switch (key.key) {
     case SDLK_EQUALS:
@@ -225,10 +282,13 @@ bool handleKey(const SDL_KeyboardEvent& key, Controls& controls, SDL_Window* win
         controls.setFocus(controls.focus.value - (shift ? coarseFocusStep : fineFocusStep));
         return true;
     case SDLK_TAB:
-        if (!key.repeat) view.showPanel = !view.showPanel;
+        if (!key.repeat) showPanel = !showPanel;
         return true;
     case SDLK_R:
-        if (!key.repeat) view.rotate(shift ? -1 : 1);
+        if (!key.repeat) settings.rotate(shift ? -1 : 1);
+        return true;
+    case SDLK_L:
+        if (!key.repeat && controls.state().hasTorch) controls.setLight(controls.light.value < 0.5f);
         return true;
     case SDLK_F11:
         if (!key.repeat) SDL_SetWindowFullscreen(window, !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN));
@@ -245,7 +305,9 @@ bool handleKey(const SDL_KeyboardEvent& key, Controls& controls, SDL_Window* win
     }
 }
 
-void drawPanel(Controls& controls, ViewSettings& view, bool connected, float height) {
+/// Returns true when the connection settings changed.
+bool drawPanel(Controls& controls, Settings& settings, ConnectionForm& form, PhoneLink& link,
+               const PhoneLink::Snapshot& snapshot, bool connected, float height) {
     const ImGuiIO& io = ImGui::GetIO();
     float width = panelWidth * ImGui::GetStyle().FontScaleDpi;
     ImGui::SetNextWindowPos({io.DisplaySize.x - width, 0});
@@ -289,14 +351,57 @@ void drawPanel(Controls& controls, ViewSettings& view, bool connected, float hei
     int quality = static_cast<int>(std::lround(controls.quality.value * 100));
     if (ImGui::SliderInt("##quality", &quality, 30, 95, "%d%%")) controls.setQuality(quality / 100.0f);
     controls.quality.held = ImGui::IsItemActive();
+
+    ImGui::SeparatorText("Light");
+    ImGui::BeginDisabled(!state.hasTorch);
+    bool lightOn = controls.light.value >= 0.5f;
+    if (ImGui::Button(lightOn ? "Light on" : "Light off", {ImGui::GetFrameHeight() * 4, 0})) controls.setLight(!lightOn);
+    ImGui::SameLine();
+    int brightness = static_cast<int>(std::lround(controls.lightLevel.value * 100));
+    if (ImGui::SliderInt("##light", &brightness, 5, 100, "%d%%")) controls.setLightLevel(brightness / 100.0f);
+    controls.lightLevel.held = ImGui::IsItemActive();
+    ImGui::EndDisabled();
     ImGui::EndDisabled();
 
     ImGui::SeparatorText("Orientation");
     float turnWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
-    if (ImGui::Button("Rotate left", {turnWidth, 0})) view.rotate(-1);
+    if (ImGui::Button("Rotate left", {turnWidth, 0})) settings.rotate(-1);
     ImGui::SameLine();
-    if (ImGui::Button("Rotate right", {turnWidth, 0})) view.rotate(1);
-    ImGui::TextDisabled(view.quarterTurns == 0 ? "As the phone sends it" : "Turned %d degrees right", view.quarterTurns * 90);
+    if (ImGui::Button("Rotate right", {turnWidth, 0})) settings.rotate(1);
+    ImGui::TextDisabled(settings.quarterTurns == 0 ? "As the phone sends it" : "Turned %d degrees right", settings.quarterTurns * 90);
+
+    ImGui::SeparatorText("Connection");
+    bool changed = false;
+    static const char* modes[] = {"Automatic, USB first", "USB cable only", "Wi-Fi only"};
+    int mode = static_cast<int>(settings.link.mode);
+    if (ImGui::Combo("##connection", &mode, modes, IM_ARRAYSIZE(modes))) {
+        settings.link.mode = static_cast<PhoneLink::Mode>(mode);
+        changed = true;
+    }
+    if (settings.link.mode != PhoneLink::Mode::usb) {
+        ImGui::TextDisabled("Wi-Fi pairing code");
+        bool asked = snapshot.status == PhoneLink::Status::needsCode;
+        if (asked) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.45f, 0.3f, 0.1f, 1));
+        ImGui::InputTextWithHint("##code", "in BoardScope's Settings", form.pairingCode, sizeof form.pairingCode,
+                                 ImGuiInputTextFlags_CharsDecimal);
+        if (asked) ImGui::PopStyleColor();
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            std::string digits;
+            for (char c : std::string(form.pairingCode)) {
+                if (c >= '0' && c <= '9') digits += c;
+            }
+            settings.link.pairingCode = digits;
+            changed = true;
+        }
+        ImGui::TextDisabled("Phone address");
+        ImGui::InputTextWithHint("##address", "found automatically", form.address, sizeof form.address,
+                                 ImGuiInputTextFlags_CharsNoBlank);
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            settings.link.address = form.address;
+            changed = true;
+        }
+    }
+    if (snapshot.status == PhoneLink::Status::takenOver && ImGui::Button("Take the iPhone back", {-1, 0})) link.reconnect();
 
     ImGui::SeparatorText("Phone");
     if (connected) {
@@ -322,11 +427,13 @@ void drawPanel(Controls& controls, ViewSettings& view, bool connected, float hei
     shortcut("1 to 8", "zoom 1x to 8x");
     shortcut("Up / Down", "focus, fine");
     shortcut("Shift+Up/Down", "focus, coarse");
+    shortcut("L", "light on / off");
     shortcut("R / Shift+R", "rotate right / left");
     shortcut("Tab", "hide controls");
     shortcut("F11", "full screen");
     ImGui::PopItemWidth();
     ImGui::End();
+    return changed;
 }
 
 void drawStatusLine(const PhoneLink::Snapshot& link, double shownFps, const FrameView& frames, float top) {
@@ -337,7 +444,9 @@ void drawStatusLine(const PhoneLink::Snapshot& link, double shownFps, const Fram
     // The tunnel opens before the app answers; it only counts once the phone has said how it is.
     bool connected = link.status == PhoneLink::Status::connected && link.state;
     ImVec4 dot = connected ? ImVec4(0.35f, 0.85f, 0.4f, 1) : ImVec4(1.0f, 0.6f, 0.2f, 1);
-    ImGui::TextColored(dot, connected ? "Connected over USB" : "Not connected");
+    bool wifi = link.transport == PhoneLink::Transport::wifi;
+    std::string where = wifi ? "Connected over Wi-Fi to " + link.phone : "Connected over USB";
+    ImGui::TextColored(dot, "%s", connected ? where.c_str() : "Not connected");
     ImGui::SameLine();
     if (link.status == PhoneLink::Status::connected && !link.state) {
         ImGui::TextUnformatted("Waiting for BoardScope to answer...");
@@ -397,11 +506,13 @@ int main(int, char**) {
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
-    PhoneLink link;
+    Settings settings;
+    settings.load();
+    PhoneLink link(settings.link);
     Controls controls(link);
+    ConnectionForm form(settings.link);
     FrameView frames(renderer);
-    ViewSettings view;
-    view.load();
+    bool showPanel = true;
     std::vector<std::uint8_t> jpeg;
     double shownFps = 0;
     int shownFrames = 0;
@@ -423,7 +534,7 @@ int main(int, char**) {
             case SDL_EVENT_KEY_DOWN:
                 if (!io.WantTextInput && (connected || event.key.key == SDLK_TAB || event.key.key == SDLK_R ||
                                           event.key.key == SDLK_F11 || event.key.key == SDLK_ESCAPE)) {
-                    handleKey(event.key, controls, window, view);
+                    handleKey(event.key, controls, window, settings, showPanel);
                 }
                 break;
             case SDL_EVENT_MOUSE_WHEEL:
@@ -450,8 +561,13 @@ int main(int, char**) {
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         float statusTop = io.DisplaySize.y - ImGui::GetFrameHeightWithSpacing() - ImGui::GetStyle().WindowPadding.y;
-        float imageWidth = io.DisplaySize.x - (view.showPanel ? panelWidth * style.FontScaleDpi : 0);
-        if (view.showPanel) drawPanel(controls, view, connected, statusTop);
+        // The pairing code is typed in the panel, so it opens when the phone asks for one.
+        if (snapshot.status == PhoneLink::Status::needsCode) showPanel = true;
+        float imageWidth = io.DisplaySize.x - (showPanel ? panelWidth * style.FontScaleDpi : 0);
+        if (showPanel && drawPanel(controls, settings, form, link, snapshot, connected, statusTop)) {
+            settings.save();
+            link.setOptions(settings.link);
+        }
         drawStatusLine(snapshot, shownFps, frames, statusTop);
 
         bool stale = snapshot.status != PhoneLink::Status::connected;
@@ -476,7 +592,7 @@ int main(int, char**) {
         SDL_SetRenderScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
         SDL_SetRenderDrawColor(renderer, 12, 12, 12, 255);
         SDL_RenderClear(renderer);
-        frames.draw({0, 0, imageWidth, statusTop}, stale, view.quarterTurns);
+        frames.draw({0, 0, imageWidth, statusTop}, stale, settings.quarterTurns);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
     }

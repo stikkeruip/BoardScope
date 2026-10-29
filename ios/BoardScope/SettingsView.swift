@@ -34,7 +34,28 @@ struct SettingsView: View {
                 } header: {
                     Text("PC stream")
                 } footer: {
-                    Text("The PC viewer connects over the USB cable. Lower quality keeps the picture smooth on a slow cable; the PC can change it too.")
+                    Text("Lower quality keeps the picture smooth on a slow link; the PC can change it too.")
+                }
+                Section {
+                    Toggle("Viewing over Wi-Fi", isOn: Binding(get: { server.isWiFiEnabled }, set: { server.setWiFiEnabled($0) }))
+                    if server.isWiFiEnabled {
+                        LabeledContent("Pairing code") {
+                            Text("\(server.pairingCode.prefix(3)) \(server.pairingCode.suffix(3))")
+                                .font(.title3.monospacedDigit().weight(.semibold))
+                        }
+                        if let address = StreamServer.wifiAddress() {
+                            LabeledContent("Phone address", value: address)
+                        }
+                        Button("New pairing code") { server.newPairingCode() }
+                    }
+                } header: {
+                    Text("Wi-Fi")
+                } footer: {
+                    if server.isWiFiEnabled, let problem = server.wifiProblem {
+                        Text(problem).foregroundStyle(.red)
+                    } else {
+                        Text("The PC viewer finds the phone on the same Wi-Fi network and asks for the pairing code once. The USB cable is used whenever it's plugged in.")
+                    }
                 }
             }
             .navigationTitle("Settings")
